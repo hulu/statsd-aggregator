@@ -1,14 +1,15 @@
-Statsd-aggregator combines metrics and optimizes network transfers to statsd.
+Statsd-aggregator does local aggregation of statsd metrics, lowering the
+network traffic and amount of data sent to statsd clusters or instances.
 
 How to compile and install:
 
-Please ensure you have development version of libev installed
+Please ensure you have a development version of libev installed
 redhat/centos: yum install libev-devel
 debian/ubuntu: apt-get install libev-dev
 
 $ make install
 
-You also can create deb package (fpm is required):
+You also can create a deb package (fpm is required):
 
 $ make pkg
 

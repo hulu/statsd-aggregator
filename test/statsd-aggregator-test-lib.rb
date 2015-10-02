@@ -1,8 +1,13 @@
 #!/usr/bin/env ruby
 
-# This is library for testing of statsd-aggregator
-# Tests are based on simulating behavior of statsd-aggregator and
-# analyzing of the output of real implementation (network and stdout)
+# This test library implements a statsd-aggregator simulator and test library
+# in ruby.  The test library (StatsdAggregatorTest) allows data to be fed in
+# and compares the output of the binary implementation of statsd-aggregator
+# with the simulator (StatsdAggregator).
+#
+# The test library is used by importing the module and calling send_data(),
+# passing in the input data to be fed to the binary implementation and the
+# simulator.
 
 require 'eventmachine'
 
@@ -195,12 +200,16 @@ class StatsdAggregatorTest
         @data_socket.send(data, 0, '127.0.0.1', IN_PORT)
     end
 
-    # this function runs actual test
+    # this function:
+    # - creates udp network socket to accept traffic from statsd-aggregator binary
+    # - start statsd-aggregator-binary
+    # - runs test sequence (sends data via send_data() function calls)
+    # - analyzes if test passed or failed
     def run()
         # let's install signal handlers
         Signal.trap("INT")  { EventMachine.stop }
         Signal.trap("TERM") { EventMachine.stop }
-        # let's generate config file for statsd aggregator
+        # now we need to generate config for statsd-aggregator for test run
         File.open(CONFIG_FILE, "w") do |f|
             f.puts("log_level=4")
             f.puts("data_port=#{IN_PORT}")
@@ -254,8 +263,7 @@ class StatsdAggregatorTest
         @expected_events << event
     end
 
-    # this function is used to notify test of external events
-    # if expected event matches actual event it is removed
+    # this function is used to process external events from statsd-aggregator binary
     def notify(event)
         STDERR.puts "got: #{event}" if $verbose
         events = @expected_events.select {|e| e[:source] == event[:source]}

@@ -1,11 +1,6 @@
 /**
  * statsd-aggregator: a local daemon for aggregating statsd metrics
  * (https://github.com/etsy/statsd/).
- *
- * Author: Kirill Timofeev <kvt@hulu.com>
- *	
- * Enjoy :-)!	
- *	
 **/
 
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"
@@ -157,7 +152,9 @@ void ds_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
     }
 }
 
-// this function switches active and flush buffers, registers handler to send data when socket would be ready
+/* this function switches active and flush buffers, registers handler to send data when
+ * socket would be ready
+ */
 void ds_schedule_flush() {
     int i = 0;
     int slot_data_length = 0;
@@ -505,7 +502,6 @@ int init_config(char *filename) {
     return 0;
 }
 
-// program entry point
 int main(int argc, char *argv[]) {
     struct ev_loop *loop = ev_default_loop(0);
     int data_socket;
