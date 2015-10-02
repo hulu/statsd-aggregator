@@ -2,6 +2,10 @@ Statsd-aggregator combines metrics and optimizes network transfers to statsd.
 
 How to compile and install:
 
+Please ensure you have development version of libev installed
+redhat/centos: yum install libev-devel
+debian/ubuntu: apt-get install libev-dev
+
 $ make install
 
 You also can create deb package (fpm is required):
