@@ -28,9 +28,9 @@
 
 // worst scenario: a lot of metrics with unique short names.
 // Metric would look like: aa:1|c\n
-// Metric length is 7 chars, 1450 / 7 = 207
-// So we need 207 slots
-#define NUM_OF_SLOTS 207 
+// Metric length is 7 chars
+// Example: 1450 / 7 = 207 so we need 207 slots if DOWNSTREAM_BUF_SIZE is 1450
+#define NUM_OF_SLOTS (DOWNSTREAM_BUF_SIZE / 7)
 
 #define MAX_COUNTER_LENGTH 18 // because of "%.15g|c\n"
 
@@ -234,6 +234,7 @@ void insert_values_into_slot(int initial_slot_idx, char *line, char *colon_ptr, 
     int metric_type = 0;
     double counter = 0;
     char *counter_ptr = NULL;
+    int counter_len = 0;
     char *endptr = NULL;
     char *rate_ptr = NULL;
     double rate = 1;
@@ -294,9 +295,9 @@ void insert_values_into_slot(int initial_slot_idx, char *line, char *colon_ptr, 
             } else {
                 counter_ptr = global.downstream.slots[slot_idx].buffer + name_length;
                 global.downstream.slots[slot_idx].counter += counter;
-                sprintf(counter_ptr, "%.15g|c\n", global.downstream.slots[slot_idx].counter);
+                counter_len = sprintf(counter_ptr, "%.15g|c\n", global.downstream.slots[slot_idx].counter);
                 global.downstream.active_buffer_length -= global.downstream.slots[slot_idx].length;
-                global.downstream.slots[slot_idx].length = global.downstream.slots[slot_idx].name_length + strlen(counter_ptr);
+                global.downstream.slots[slot_idx].length = global.downstream.slots[slot_idx].name_length + counter_len;
                 global.downstream.active_buffer_length += global.downstream.slots[slot_idx].length;
                 log_msg(TRACE, "%s: counter delta = %.15g, counter value = %.15g", __func__, counter, global.downstream.slots[slot_idx].counter);
             }

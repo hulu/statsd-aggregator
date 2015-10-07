@@ -18,7 +18,7 @@ pkg: bin
 	cd build && \
 	fpm --deb-user root --deb-group root -d libev-dev --description $(PKG_DESCRIPTION) -s dir -t deb -v $(PKG_VERSION) -n $(PKG_NAME) `find . -type f` && \
 	rm -rf `ls|grep -v deb$$`
-test:
+test: bin
 	cd test && ./run-all-tests.sh
 install: bin
 	cp statsd-aggregator /usr/bin

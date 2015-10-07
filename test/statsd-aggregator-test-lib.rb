@@ -32,6 +32,7 @@ DEFAULT_TEST_TIMEOUT = 20
 # min and max metrics length (those are processed differently than metrics with garbage content)
 MIN_METRICS_LENGTH = 6
 MAX_METRICS_LENGTH = 1450
+MAX_COUNTER_LENGTH = 18 # because of "%.15g|c\n"
 
 # we are extending String class with numeric? method
 # it should return true if string is float number, false otherwise
@@ -127,7 +128,7 @@ class StatsdAggregator
                     next
                 end
             end
-            if @active_buffer_length + (m.size + 1) > MAX_METRICS_LENGTH
+            if @active_buffer_length + (metric_type == "counter" ? MAX_COUNTER_LENGTH : m.size + 1) > MAX_METRICS_LENGTH
                 # we have enough data, let's flush
                 flush()
                 # flush() resets slots, need to create new slot
