@@ -467,7 +467,7 @@ int init_config(char *filename) {
     size_t n = 0;
     int l = 0;
     int failures = 0;
-    char *buffer;
+    char *buffer = NULL;
 
     global.log_level = 0;
     FILE *config_file = fopen(filename, "rt");

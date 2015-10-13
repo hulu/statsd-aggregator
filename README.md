@@ -1,6 +1,25 @@
 Statsd-aggregator does local aggregation of statsd metrics, lowering the
 network traffic and amount of data sent to statsd clusters or instances.
 
+How it works.
+
+Statsd aggregator accepts udp traffic in statsd (https://github.com/etsy/statsd)
+format. Counters are aggregated by summing values, all other metrics are
+aggregated by sending all values with same name prefix. Aggregated data is
+being fit into packets not exceeding MTU and is flushed to the downstream
+according to the flush interval. E.g. if statsd aggregator would get
+following data:
+
+test.counter:1|c
+test.timer:23|ms
+test.counter:10|c
+test.timer:51|ms
+
+it would aggregate it into
+
+test.counter:11|c
+test.timer:23|ms:51|ms
+
 How to compile and install:
 
 Please ensure you have a development version of libev installed
@@ -26,6 +45,11 @@ log_level - How noisy are our logs (4 - error, 3 - warn, 2 - info, 1 - debug, 0 
 Statsd-aggregator can be controlled via /etc/init.d/statsd-aggregator
 
 How tests work.
+
+Testing framework is written in ruby and requires evenmachine gem, please
+install it using following command:
+
+$ sudo gem install eventmachine
 
 To run tests use:
 
