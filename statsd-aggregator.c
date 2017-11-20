@@ -36,8 +36,14 @@
 
 #define MAX_COUNTER_LENGTH 18 // because of "%.15g|c\n"
 
-// let's check periodically if downstream ip changed
-#define DOWNSTREAM_REFRESH_TIMEOUT 60
+// default interval to check if downstream ips changed
+#define DEFAULT_DNS_REFRESH_INTERVAL 60
+
+// default interval to check downstream health
+#define DEFAULT_DS_HEALTHCHECK_INTERVAL 1.0
+
+#define DEFAULT_LOG_LEVEL 0
+#define MAX_DOWNSTREAM_NUM 32
 
 // structure to accumulate metrics data for specific name
 typedef struct {
@@ -47,6 +53,10 @@ typedef struct {
     double counter;
     int type;
 } slot_s;
+
+struct downstream_host_s {
+    struct sockaddr_in sa_in_data;
+};
 
 // structure that holds downstream data
 struct downstream_s {
@@ -65,7 +75,7 @@ struct downstream_s {
     // sockaddr for data (used for flush)
     struct sockaddr_in sa_in_data;
     // new sockaddr filled in by the downstream_refresh()
-    struct sockaddr_in sa_in_data_new;
+    struct sockaddr_in sa_in_data_new[MAX_DOWNSTREAM_NUM];
     // flag that new sockaddr data is available
     int sa_in_data_new_ready;
     // id extended ev_io structure used for sending data to downstream
@@ -76,6 +86,8 @@ struct downstream_s {
     slot_s slots[NUM_OF_SLOTS];
     // how many slots are used
     int slots_used;
+    // how many downstream hosts we have
+    int downstream_host_num;
 };
 
 // globally accessed structure with commonly used data
@@ -87,6 +99,10 @@ struct global_s {
     ev_tstamp downstream_flush_interval;
     // how noisy is our log
     int log_level;
+    // how often we want to check if downstream ips were changed
+    int dns_refresh_interval;
+    // how often we check health of the downstreams
+    ev_tstamp downstream_health_check_interval;
 };
 
 struct global_s global;
@@ -135,7 +151,7 @@ void log_msg(int level, char *format, ...) {
 }
 
 // this function flushes data to downstream
-void ds_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
+void downstream_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
     int bytes_send;
     int flush_buffer_idx = global.downstream.flush_buffer_idx;
 
@@ -144,11 +160,6 @@ void ds_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
         return;
     }
 
-    // if there is new sockaddr data let's copy it and reset the flag
-    if (global.downstream.sa_in_data_new_ready == 1) {
-        global.downstream.sa_in_data = global.downstream.sa_in_data_new;
-        global.downstream.sa_in_data_new_ready = 0;
-    }
     bytes_send = sendto(watcher->fd,
         global.downstream.buffer + flush_buffer_idx * DOWNSTREAM_BUF_SIZE,
         global.downstream.buffer_length[flush_buffer_idx],
@@ -171,7 +182,7 @@ void ds_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
 /* this function switches active and flush buffers, registers handler to send data when
  * socket would be ready
  */
-void ds_schedule_flush() {
+void downstream_schedule_flush() {
     int i = 0;
     int slot_data_length = 0;
     int active_buffer_length = 0;
@@ -205,7 +216,7 @@ void ds_schedule_flush() {
     log_msg(TRACE, "%s: new active buffer idx = %d", __func__, new_active_buffer_idx);
     if (need_to_schedule_flush) {
         watcher = &(global.downstream.flush_watcher);
-        ev_io_init(watcher, ds_flush_cb, watcher->fd, EV_WRITE);
+        ev_io_init(watcher, downstream_flush_cb, watcher->fd, EV_WRITE);
         ev_io_start(ev_default_loop(0), watcher);
     }
 }
@@ -233,7 +244,7 @@ int find_slot(char *line, int name_length) {
     }
     if (global.downstream.active_buffer_length + name_length > DOWNSTREAM_BUF_SIZE) {
         log_msg(TRACE, "%s: active_buffer_length = %d, name_length = %d, scheduling flush", __func__, global.downstream.active_buffer_length, name_length);
-        ds_schedule_flush();
+        downstream_schedule_flush();
     }
     return add_slot(line, name_length);
 }
@@ -287,7 +298,7 @@ void insert_values_into_slot(int initial_slot_idx, char *line, char *colon_ptr, 
         }
         // if metric is counter let's use maximum possible length of resulting string (because of "%.15g|c\n" below)
         if (global.downstream.active_buffer_length + (metric_type == TYPE_COUNTER ? MAX_COUNTER_LENGTH : data_length) > DOWNSTREAM_BUF_SIZE) {
-            ds_schedule_flush();
+            downstream_schedule_flush();
             slot_idx = add_slot(line, name_length);
             global.downstream.slots[slot_idx].type = metric_type;
         }
@@ -390,27 +401,32 @@ void udp_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
 }
 
 // this function cycles through downstreams and flushes them on scheduled basis
-void ds_flush_timer_cb(struct ev_loop *loop, struct ev_periodic *p, int revents) {
+void downstream_flush_timer_cb(struct ev_loop *loop, struct ev_periodic *p, int revents) {
     ev_tstamp now = ev_now(loop);
 
     if (now - global.downstream.last_flush_time > global.downstream_flush_interval &&
             global.downstream.active_buffer_length > 0) {
-        ds_schedule_flush();
+        downstream_schedule_flush();
     }
 }
 
 void init_sockaddr_in() {
-    struct sockaddr_in *sa_in = &global.downstream.sa_in_data_new;
+    int i = 0;
+    struct sockaddr_in *sa_in = NULL;
     struct hostent *he = gethostbyname(global.downstream.data_host);
 
     if (he == NULL || he->h_addr_list == NULL || (he->h_addr_list)[0] == NULL ) {
         log_msg(ERROR, "%s: gethostbyname() failed %s", __func__, strerror(errno));
         return;
     }
-    bzero(sa_in, sizeof(*sa_in));
-    sa_in->sin_family = AF_INET;
-    sa_in->sin_port = htons(global.downstream.data_port);
-    memcpy(&(sa_in->sin_addr), he->h_addr_list[0], he->h_length);
+    for (i = 0; i < MAX_DOWNSTREAM_NUM && he->h_addr_list[i] != NULL; i++) {
+        sa_in = global.downstream.sa_in_data_new + i;
+        bzero(sa_in, sizeof(*sa_in));
+        sa_in->sin_family = AF_INET;
+        sa_in->sin_port = htons(global.downstream.data_port);
+        memcpy(&(sa_in->sin_addr), he->h_addr_list[i], he->h_length);
+        log_msg(DEBUG, "%s %x", inet_ntoa(*(struct in_addr *)(he->h_addr_list[i])), (int)(sa_in->sin_addr.s_addr));
+    }
     global.downstream.sa_in_data_new_ready = 1;
 }
 
@@ -449,6 +465,10 @@ int init_downstream(char *hosts) {
     global.downstream.data_port = atoi(data_port_s);
     global.downstream.sa_in_data_new_ready = 0;
     init_sockaddr_in();
+    if (global.downstream.sa_in_data_new_ready != 1) {
+        log_msg(ERROR, "%s: failed to initialize sockaddr_in structures", __func__);
+        return 1;
+    }
     return 0;
 }
 
@@ -467,6 +487,10 @@ int process_config_line(char *line) {
         global.downstream_flush_interval = atof(value_ptr);
     } else if (strcmp("log_level", line) == 0) {
         global.log_level = atoi(value_ptr);
+    } else if (strcmp("dns_refresh_interval", line) == 0) {
+        global.dns_refresh_interval = atoi(value_ptr);
+    } else if (strcmp("downstream_health_check_interval", line) == 0) {
+        global.downstream_health_check_interval = atof(value_ptr);
     } else if (strcmp("downstream", line) == 0) {
         return init_downstream(value_ptr);
     } else {
@@ -493,7 +517,9 @@ int init_config(char *filename) {
     int failures = 0;
     char *buffer = NULL;
 
-    global.log_level = 0;
+    global.log_level = DEFAULT_LOG_LEVEL;
+    global.dns_refresh_interval = DEFAULT_DNS_REFRESH_INTERVAL;
+    global.downstream_health_check_interval = DEFAULT_DS_HEALTHCHECK_INTERVAL;
     FILE *config_file = fopen(filename, "rt");
     if (config_file == NULL) {
         log_msg(ERROR, "%s: fopen() failed %s", __func__, strerror(errno));
@@ -529,13 +555,25 @@ int init_config(char *filename) {
 
 void *downstream_refresh(void *args) {
     while(1) {
-        sleep(DOWNSTREAM_REFRESH_TIMEOUT);
+        sleep(global.dns_refresh_interval);
         // if sockaddr data was copied let's refresh data
         if (global.downstream.sa_in_data_new_ready == 0) {
             init_sockaddr_in();
         }
     }
     return NULL;
+}
+
+void update_downstreams() {
+    // if there is new sockaddr data let's copy it and reset the flag
+    if (global.downstream.sa_in_data_new_ready == 1) {
+        global.downstream.sa_in_data = global.downstream.sa_in_data_new[0];
+        global.downstream.sa_in_data_new_ready = 0;
+    }
+}
+
+void downstream_healthcheck_timer_cb(struct ev_loop *loop, struct ev_periodic *p, int revents) {
+    update_downstreams();
 }
 
 // http://stackoverflow.com/questions/791982/determine-if-a-string-is-a-valid-ip-address-in-c
@@ -550,8 +588,10 @@ int main(int argc, char *argv[]) {
     int data_socket;
     struct sockaddr_in addr;
     struct ev_io socket_watcher;
-    struct ev_periodic ds_flush_timer_watcher;
-    ev_tstamp ds_flush_timer_at = 0.0;
+    struct ev_periodic downstream_flush_timer_watcher;
+    struct ev_periodic downstream_healthcheck_timer_watcher;
+    ev_tstamp downstream_flush_timer_at = 0.0;
+    ev_tstamp downstream_healthcheck_timer_at = 0.0;
     pthread_t downstream_socket_refresh_thread;
 
    if (argc != 2) {
@@ -585,8 +625,11 @@ int main(int argc, char *argv[]) {
     ev_io_init(&socket_watcher, udp_read_cb, data_socket, EV_READ);
     ev_io_start(loop, &socket_watcher);
 
-    ev_periodic_init (&ds_flush_timer_watcher, ds_flush_timer_cb, ds_flush_timer_at, global.downstream_flush_interval, 0);
-    ev_periodic_start (loop, &ds_flush_timer_watcher);
+    ev_periodic_init (&downstream_flush_timer_watcher, downstream_flush_timer_cb, downstream_flush_timer_at, global.downstream_flush_interval, 0);
+    ev_periodic_start (loop, &downstream_flush_timer_watcher);
+
+    ev_periodic_init (&downstream_healthcheck_timer_watcher, downstream_healthcheck_timer_cb, downstream_healthcheck_timer_at, global.downstream_health_check_interval, 0);
+    ev_periodic_start (loop, &downstream_healthcheck_timer_watcher);
 
     ev_loop(loop, 0);
     log_msg(ERROR, "%s: ev_loop() exited", __func__);
