@@ -56,6 +56,7 @@ typedef struct {
 
 struct downstream_host_s {
     struct sockaddr_in sa_in_data;
+    struct downstream_host_s *next;
 };
 
 // structure that holds downstream data
@@ -88,6 +89,7 @@ struct downstream_s {
     int slots_used;
     // how many downstream hosts we have
     int downstream_host_num;
+    struct downstream_host_s *downstream_hosts;
 };
 
 // globally accessed structure with commonly used data
@@ -427,6 +429,7 @@ void init_sockaddr_in() {
         memcpy(&(sa_in->sin_addr), he->h_addr_list[i], he->h_length);
         log_msg(DEBUG, "%s %x", inet_ntoa(*(struct in_addr *)(he->h_addr_list[i])), (int)(sa_in->sin_addr.s_addr));
     }
+    global.downstream.downstream_host_num = i;
     global.downstream.sa_in_data_new_ready = 1;
 }
 
@@ -440,6 +443,8 @@ int init_downstream(char *hosts) {
     // argument line has the following format: host:data_port
     // now let's initialize downstreams
     global.downstream.slots_used = 0;
+    global.downstream.downstream_host_num = 0;
+    global.downstream.downstream_hosts = NULL;
     global.downstream.last_flush_time = ev_time();
     global.downstream.active_buffer_idx = 0;
     global.downstream.active_buffer = global.downstream.buffer;
@@ -565,11 +570,54 @@ void *downstream_refresh(void *args) {
 }
 
 void update_downstreams() {
-    // if there is new sockaddr data let's copy it and reset the flag
-    if (global.downstream.sa_in_data_new_ready == 1) {
-        global.downstream.sa_in_data = global.downstream.sa_in_data_new[0];
-        global.downstream.sa_in_data_new_ready = 0;
+    struct downstream_host_s *host = global.downstream.downstream_hosts;
+    struct downstream_host_s *next = NULL;
+    struct downstream_host_s **prev = &global.downstream.downstream_hosts;
+    int i = 0;
+    int delete_host = 0;
+
+    // if there is no new data just return
+    if (global.downstream.sa_in_data_new_ready == 0) {
+        return;
     }
+    // if there is new sockaddr data let's copy it and reset the flag
+    while (host != NULL) {
+        next = host->next;
+        delete_host = 1;
+        log_msg(DEBUG, "%s: existing ip: %x", __func__, (int)(host->sa_in_data.sin_addr.s_addr));
+        for (i = 0; i < global.downstream.downstream_host_num; i++) {
+            if (host->sa_in_data.sin_addr.s_addr == (global.downstream.sa_in_data_new + i)->sin_addr.s_addr) {
+                (global.downstream.sa_in_data_new + i)->sin_addr.s_addr = 0;
+                delete_host = 0;
+                log_msg(DEBUG, "%s: this ip is valid", __func__);
+                break;
+            }
+        }
+        if (delete_host == 1) {
+            log_msg(DEBUG, "%s: removing this ip", __func__);
+            *prev = next;
+            free(host);
+        }
+        prev = &(host->next);
+        host = next;
+    }
+    for (i = 0; i < global.downstream.downstream_host_num; i++) {
+        if ((global.downstream.sa_in_data_new + i)->sin_addr.s_addr == 0) {
+            continue;
+        }
+        host = (struct downstream_host_s *)malloc(sizeof(struct downstream_host_s));
+        if (host == NULL) {
+            log_msg(ERROR, "%s: failed to allocate memory for the downstream_host_s", __func__);
+            return;
+        }
+        host->sa_in_data = *(global.downstream.sa_in_data_new + i);
+        log_msg(DEBUG, "%s: added new ip: %x", __func__, (int)(host->sa_in_data.sin_addr.s_addr));
+        host->next = global.downstream.downstream_hosts;
+        global.downstream.downstream_hosts = host;
+    }
+
+    global.downstream.sa_in_data = global.downstream.sa_in_data_new[0];
+    global.downstream.sa_in_data_new_ready = 0;
 }
 
 void downstream_healthcheck_timer_cb(struct ev_loop *loop, struct ev_periodic *p, int revents) {
