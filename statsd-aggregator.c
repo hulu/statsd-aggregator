@@ -74,9 +74,7 @@ struct downstream_s {
     int buffer_length[DOWNSTREAM_BUF_NUM];
     char *data_host;
     int data_port;
-    // sockaddr for data (used for flush)
-    struct sockaddr_in sa_in_data;
-    // new sockaddr filled in by the downstream_refresh()
+    // new ip addrs filled in by the downstream_refresh()
     struct in_addr in_addr_new[MAX_DOWNSTREAM_NUM];
     // flag that new sockaddr data is available
     int in_addr_new_ready;
@@ -92,6 +90,7 @@ struct downstream_s {
     int downstream_host_num;
     struct downstream_host_s *downstream_hosts;
     int packets_sent;
+    struct downstream_host_s *current_downstream_host;
 };
 
 // globally accessed structure with commonly used data
@@ -164,12 +163,17 @@ void downstream_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revent
         return;
     }
 
+    if (global.downstream.current_downstream_host == NULL) {
+        log_msg(ERROR, "%s: no downstream hosts", __func__);
+        return;
+    }
+
     bytes_send = sendto(watcher->fd,
         global.downstream.buffer + flush_buffer_idx * DOWNSTREAM_BUF_SIZE,
         global.downstream.buffer_length[flush_buffer_idx],
         0,
-        (struct sockaddr *) (&global.downstream.sa_in_data),
-        sizeof(global.downstream.sa_in_data));
+        (struct sockaddr *) (&(global.downstream.current_downstream_host->sa_in_data)),
+        sizeof(global.downstream.current_downstream_host->sa_in_data));
     // update flush time
     global.downstream.last_flush_time = ev_now(loop);
     global.downstream.buffer_length[flush_buffer_idx] = 0;
@@ -182,6 +186,16 @@ void downstream_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revent
     if (bytes_send < 0) {
         log_msg(ERROR, "%s: sendto() failed %s", __func__, strerror(errno));
     }
+}
+
+void set_current_downstream_host() {
+    struct downstream_host_s *host = global.downstream.current_downstream_host;
+
+    if (host == NULL || host->next == NULL) {
+        global.downstream.current_downstream_host = global.downstream.downstream_hosts;
+        return;
+    }
+    global.downstream.current_downstream_host = host->next;
 }
 
 /* this function switches active and flush buffers, registers handler to send data when
@@ -224,6 +238,7 @@ void downstream_schedule_flush() {
         watcher = &(global.downstream.flush_watcher);
         if (global.downstream.packets_sent > MAX_PACKETS_PER_SOCKET) {
             global.downstream.packets_sent = 0;
+            set_current_downstream_host();
             new_socket_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
             if (new_socket_fd < 0) {
                 log_msg(ERROR, "%s: socket() failed %s", __func__, strerror(errno));
@@ -457,6 +472,7 @@ int init_downstream(char *hosts) {
     global.downstream.slots_used = 0;
     global.downstream.downstream_host_num = 0;
     global.downstream.downstream_hosts = NULL;
+    global.downstream.current_downstream_host = NULL;
     global.downstream.last_flush_time = ev_time();
     global.downstream.active_buffer_idx = 0;
     global.downstream.active_buffer = global.downstream.buffer;
@@ -606,6 +622,7 @@ void update_downstreams() {
             }
         }
         if (delete_host == 1) {
+            global.downstream.current_downstream_host = global.downstream.downstream_hosts;
             log_msg(DEBUG, "%s: removing this ip", __func__);
             *prev = next;
             free(host);
@@ -629,12 +646,8 @@ void update_downstreams() {
         log_msg(DEBUG, "%s: added new ip: %x", __func__, (int)(host->sa_in_data.sin_addr.s_addr));
         host->next = global.downstream.downstream_hosts;
         global.downstream.downstream_hosts = host;
+        global.downstream.current_downstream_host = host;
     }
-
-    bzero(&global.downstream.sa_in_data, sizeof(global.downstream.sa_in_data));
-    global.downstream.sa_in_data.sin_family = AF_INET;
-    global.downstream.sa_in_data.sin_port = htons(global.downstream.data_port);
-    global.downstream.sa_in_data.sin_addr = global.downstream.in_addr_new[0];
 
     global.downstream.in_addr_new_ready = 0;
 }
