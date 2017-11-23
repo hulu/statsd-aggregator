@@ -40,11 +40,13 @@
 #define DEFAULT_DNS_REFRESH_INTERVAL 60
 
 // default interval to check downstream health
-#define DEFAULT_DS_HEALTHCHECK_INTERVAL 1.0
+#define DEFAULT_DOWNSTREAM_HEALTHCHECK_INTERVAL 1.0
 
 #define DEFAULT_LOG_LEVEL 0
 #define MAX_DOWNSTREAM_NUM 32
 #define MAX_PACKETS_PER_SOCKET 1000
+#define DEFAULT_HEALTH_PORT 8125
+#define DEFAULT_DATA_PORT 8125
 
 // structure to accumulate metrics data for specific name
 typedef struct {
@@ -55,9 +57,26 @@ typedef struct {
     int type;
 } slot_s;
 
+#define STRLEN(s) (sizeof(s) / sizeof(s[0]) - 1)
+
+#define DOWNSTREAM_HEALTH_CHECK_BUF_SIZE 32
+#define HEALTH_CHECK_REQUEST "health"
+#define HEALTH_CHECK_RESPONSE_BUF_SIZE 32
+#define HEALTH_CHECK_UP_RESPONSE "health: up\n"
+
+struct downstream_health_client_s {
+    // ev_io structure used for downstream health checks
+    struct ev_io super;
+    // sockaddr for health connection
+    struct sockaddr_in sa_in;
+    // bit flag if this downstream is alive
+    unsigned int alive:1;
+};
+
 struct downstream_host_s {
     struct sockaddr_in sa_in_data;
     struct downstream_host_s *next;
+    struct downstream_health_client_s health_client;
 };
 
 // structure that holds downstream data
@@ -74,6 +93,7 @@ struct downstream_s {
     int buffer_length[DOWNSTREAM_BUF_NUM];
     char *data_host;
     int data_port;
+    int health_port;
     // new ip addrs filled in by the downstream_refresh()
     struct in_addr in_addr_new[MAX_DOWNSTREAM_NUM];
     // flag that new sockaddr data is available
@@ -468,6 +488,8 @@ int init_downstream(char *hosts) {
 
     // argument line has the following format: host:data_port
     // now let's initialize downstreams
+    global.downstream.data_port = DEFAULT_DATA_PORT;
+    global.downstream.health_port = DEFAULT_HEALTH_PORT;
     global.downstream.packets_sent = 0;
     global.downstream.slots_used = 0;
     global.downstream.downstream_host_num = 0;
@@ -499,7 +521,7 @@ int init_downstream(char *hosts) {
     global.downstream.in_addr_new_ready = 0;
     get_dns_data();
     if (global.downstream.in_addr_new_ready != 1) {
-        log_msg(ERROR, "%s: failed to initialize sockaddr_in structures", __func__);
+        log_msg(ERROR, "%s: failed to retrieve downstream hosts", __func__);
         return 1;
     }
     return 0;
@@ -552,7 +574,7 @@ int init_config(char *filename) {
 
     global.log_level = DEFAULT_LOG_LEVEL;
     global.dns_refresh_interval = DEFAULT_DNS_REFRESH_INTERVAL;
-    global.downstream_health_check_interval = DEFAULT_DS_HEALTHCHECK_INTERVAL;
+    global.downstream_health_check_interval = DEFAULT_DOWNSTREAM_HEALTHCHECK_INTERVAL;
     FILE *config_file = fopen(filename, "rt");
     if (config_file == NULL) {
         log_msg(ERROR, "%s: fopen() failed %s", __func__, strerror(errno));
@@ -643,6 +665,11 @@ void update_downstreams() {
         host->sa_in_data.sin_family = AF_INET;
         host->sa_in_data.sin_port = htons(global.downstream.data_port);
         host->sa_in_data.sin_addr = global.downstream.in_addr_new[i];
+        host->health_client.sa_in.sin_family = AF_INET;
+        host->health_client.sa_in.sin_port = htons(global.downstream.health_port);
+        host->health_client.sa_in.sin_addr = global.downstream.in_addr_new[i];
+        host->health_client.super.fd = -1;
+        host->health_client.alive = 0;
         log_msg(DEBUG, "%s: added new ip: %x", __func__, (int)(host->sa_in_data.sin_addr.s_addr));
         host->next = global.downstream.downstream_hosts;
         global.downstream.downstream_hosts = host;
@@ -652,8 +679,121 @@ void update_downstreams() {
     global.downstream.in_addr_new_ready = 0;
 }
 
+int setnonblock(int fd) {
+    int flags = fcntl(fd, F_GETFL);
+    flags |= O_NONBLOCK;
+    return fcntl(fd, F_SETFL, flags);
+}
+
+void downstream_mark_down(struct ev_io *watcher) {
+    struct downstream_health_client_s *health_client = (struct downstream_health_client_s *)watcher;
+    if (watcher->fd > 0) {
+        close(watcher->fd);
+        watcher->fd = -1;
+    }
+    if (health_client->alive == 1) {
+        health_client->alive = 0;
+        log_msg(DEBUG, "%s: downstream %s is down", __func__, inet_ntoa(health_client->sa_in.sin_addr));
+    }
+}
+
+void downstream_health_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
+    struct downstream_health_client_s *health_client = (struct downstream_health_client_s *)watcher;
+    char buffer[DOWNSTREAM_HEALTH_CHECK_BUF_SIZE];
+    int health_fd = watcher->fd;
+    ev_io_stop(loop, watcher);
+    int n = recv(health_fd, buffer, DOWNSTREAM_HEALTH_CHECK_BUF_SIZE, 0);
+    if (n <= 0) {
+        log_msg(WARN, "%s: recv() failed %s", __func__, strerror(errno));
+        downstream_mark_down(watcher);
+        return;
+    }
+    buffer[n] = 0;
+    if (memcmp(buffer, HEALTH_CHECK_UP_RESPONSE, STRLEN(HEALTH_CHECK_UP_RESPONSE)) != 0) {
+        downstream_mark_down(watcher);
+        return;
+    }
+    if (health_client->alive == 0) {
+        health_client->alive = 1;
+        log_msg(DEBUG, "%s: downstream %s is up", __func__, inet_ntoa(health_client->sa_in.sin_addr));
+    }
+}
+
+void downstream_health_send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
+    int health_fd = watcher->fd;
+    ev_io_stop(loop, watcher);
+    int n = send(health_fd, HEALTH_CHECK_REQUEST, STRLEN(HEALTH_CHECK_REQUEST), 0);
+    if (n <= 0) {
+        log_msg(WARN, "%s: send() failed %s", __func__, strerror(errno));
+        downstream_mark_down(watcher);
+        return;
+    }
+    ev_io_init(watcher, downstream_health_read_cb, health_fd, EV_READ);
+    ev_io_start(loop, watcher);
+}
+
+void downstream_health_connect_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
+    int health_fd = watcher->fd;
+    int err;
+
+    socklen_t len = sizeof(err);
+    ev_io_stop(loop, watcher);
+    getsockopt(health_fd, SOL_SOCKET, SO_ERROR, &err, &len);
+    if (err) {
+        downstream_mark_down(watcher);
+        return;
+    } else {
+        ev_io_init(watcher, downstream_health_send_cb, health_fd, EV_WRITE);
+        ev_io_start(loop, watcher);
+    }
+}
+
+void check_downstream_health(struct ev_loop *loop) {
+    struct downstream_host_s *host = NULL;
+    struct ev_io *watcher = NULL;
+    int health_fd = 0;
+    int n = 0;
+    struct downstream_health_client_s *health_client;
+
+    for (host = global.downstream.downstream_hosts; host != NULL; host = host->next) {
+        health_client = &(host->health_client);
+        watcher = (struct ev_io *)health_client;
+        health_fd = watcher->fd;
+        if (health_fd > 0 && ev_is_active(watcher)) {
+            log_msg(WARN, "%s: previous health check request was not completed", __func__);
+            ev_io_stop(loop, watcher);
+            downstream_mark_down(watcher);
+            health_fd = -1;
+        }
+        if (health_fd < 0) {
+            health_fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (health_fd == -1) {
+                log_msg(WARN, "%s: socket() failed %s", __func__, strerror(errno));
+                continue;
+            }
+            if (setnonblock(health_fd) == -1) {
+                close(health_fd);
+                log_msg(WARN, "%s: setnonblock() failed %s", __func__, strerror(errno));
+                continue;
+            }
+            n = connect(health_fd, (struct sockaddr *)&(health_client->sa_in), sizeof(health_client->sa_in));
+            if (n == -1 && errno == EINPROGRESS) {
+                ev_io_init(watcher, downstream_health_connect_cb, health_fd, EV_WRITE);
+            } else {
+                log_msg(WARN, "%s: connect() failed %s", __func__, strerror(errno));
+                close(health_fd);
+                continue;
+            }
+        } else {
+            ev_io_init(watcher, downstream_health_send_cb, health_fd, EV_WRITE);
+        }
+        ev_io_start(loop, watcher);
+    }
+}
+
 void downstream_healthcheck_timer_cb(struct ev_loop *loop, struct ev_periodic *p, int revents) {
     update_downstreams();
+    check_downstream_health(loop);
 }
 
 // http://stackoverflow.com/questions/791982/determine-if-a-string-is-a-valid-ip-address-in-c
