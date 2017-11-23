@@ -44,6 +44,7 @@
 
 #define DEFAULT_LOG_LEVEL 0
 #define MAX_DOWNSTREAM_NUM 32
+#define MAX_PACKETS_PER_SOCKET 1000
 
 // structure to accumulate metrics data for specific name
 typedef struct {
@@ -90,6 +91,7 @@ struct downstream_s {
     // how many downstream hosts we have
     int downstream_host_num;
     struct downstream_host_s *downstream_hosts;
+    int packets_sent;
 };
 
 // globally accessed structure with commonly used data
@@ -171,6 +173,7 @@ void downstream_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revent
     // update flush time
     global.downstream.last_flush_time = ev_now(loop);
     global.downstream.buffer_length[flush_buffer_idx] = 0;
+    global.downstream.packets_sent++;
     global.downstream.flush_buffer_idx = (flush_buffer_idx + 1) % DOWNSTREAM_BUF_NUM;
     log_msg(TRACE, "%s: flushed buffer %d", __func__, flush_buffer_idx);
     if (global.downstream.flush_buffer_idx == global.downstream.active_buffer_idx) {
@@ -185,6 +188,7 @@ void downstream_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revent
  * socket would be ready
  */
 void downstream_schedule_flush() {
+    int new_socket_fd = 0;
     int i = 0;
     int slot_data_length = 0;
     int active_buffer_length = 0;
@@ -218,6 +222,16 @@ void downstream_schedule_flush() {
     log_msg(TRACE, "%s: new active buffer idx = %d", __func__, new_active_buffer_idx);
     if (need_to_schedule_flush) {
         watcher = &(global.downstream.flush_watcher);
+        if (global.downstream.packets_sent > MAX_PACKETS_PER_SOCKET) {
+            global.downstream.packets_sent = 0;
+            new_socket_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            if (new_socket_fd < 0) {
+                log_msg(ERROR, "%s: socket() failed %s", __func__, strerror(errno));
+            } else {
+                close(watcher->fd);
+                watcher->fd = new_socket_fd;
+            }
+        }
         ev_io_init(watcher, downstream_flush_cb, watcher->fd, EV_WRITE);
         ev_io_start(ev_default_loop(0), watcher);
     }
@@ -439,6 +453,7 @@ int init_downstream(char *hosts) {
 
     // argument line has the following format: host:data_port
     // now let's initialize downstreams
+    global.downstream.packets_sent = 0;
     global.downstream.slots_used = 0;
     global.downstream.downstream_host_num = 0;
     global.downstream.downstream_hosts = NULL;
