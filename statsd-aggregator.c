@@ -209,6 +209,7 @@ void downstream_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revent
     set_current_downstream_host();
     if (global.downstream.current_downstream_host == NULL) {
         log_msg(ERROR, "%s: no downstream hosts", __func__);
+        ev_io_stop(loop, watcher);
         return;
     }
     log_msg(DEBUG, "%s: flushing to %s", __func__, inet_ntoa(global.downstream.current_downstream_host->sa_in_data.sin_addr));
