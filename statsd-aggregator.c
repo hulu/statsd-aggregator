@@ -633,7 +633,7 @@ void *downstream_refresh(void *args) {
     return NULL;
 }
 
-void update_downstreams() {
+void update_downstreams(struct ev_loop *loop) {
     struct downstream_host_s *host = global.downstream.downstream_hosts;
     struct downstream_host_s *next = NULL;
     struct downstream_host_s **prev = &global.downstream.downstream_hosts;
@@ -661,6 +661,12 @@ void update_downstreams() {
             global.downstream.current_downstream_host = global.downstream.downstream_hosts;
             log_msg(DEBUG, "%s: removing this ip", __func__);
             *prev = next;
+            if (host->health_client.super.fd > 0) {
+                if (ev_is_active(&(host->health_client.super))) {
+                    ev_io_stop(loop, &(host->health_client.super));
+                }
+                close(host->health_client.super.fd);
+            }
             free(host);
         }
         prev = &(host->next);
@@ -805,7 +811,7 @@ void check_downstream_health(struct ev_loop *loop) {
 }
 
 void downstream_healthcheck_timer_cb(struct ev_loop *loop, struct ev_periodic *p, int revents) {
-    update_downstreams();
+    update_downstreams(loop);
     check_downstream_health(loop);
 }
 
