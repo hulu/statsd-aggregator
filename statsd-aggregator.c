@@ -473,7 +473,7 @@ void get_dns_data() {
     for (i = 0; i < MAX_DOWNSTREAM_NUM && he->h_addr_list[i] != NULL; i++) {
         addr = global.downstream.in_addr_new + i;
         memcpy(addr, he->h_addr_list[i], he->h_length);
-        log_msg(DEBUG, "%s %x", inet_ntoa(*(struct in_addr *)(he->h_addr_list[i])), (int)(addr->s_addr));
+        log_msg(DEBUG, "%s: %s", __func__, inet_ntoa(*(struct in_addr *)(he->h_addr_list[i])));
     }
     global.downstream.downstream_host_num = i;
     global.downstream.in_addr_new_ready = 1;
@@ -634,7 +634,7 @@ void update_downstreams() {
     while (host != NULL) {
         next = host->next;
         delete_host = 1;
-        log_msg(DEBUG, "%s: existing ip: %x", __func__, (int)(host->sa_in_data.sin_addr.s_addr));
+        log_msg(DEBUG, "%s: existing ip: %s", __func__, inet_ntoa(host->sa_in_data.sin_addr));
         for (i = 0; i < global.downstream.downstream_host_num; i++) {
             if (host->sa_in_data.sin_addr.s_addr == (global.downstream.in_addr_new + i)->s_addr) {
                 (global.downstream.in_addr_new + i)->s_addr = 0;
@@ -670,7 +670,7 @@ void update_downstreams() {
         host->health_client.sa_in.sin_addr = global.downstream.in_addr_new[i];
         host->health_client.super.fd = -1;
         host->health_client.alive = 0;
-        log_msg(DEBUG, "%s: added new ip: %x", __func__, (int)(host->sa_in_data.sin_addr.s_addr));
+        log_msg(DEBUG, "%s: added new ip: %s", __func__, inet_ntoa(host->sa_in_data.sin_addr));
         host->next = global.downstream.downstream_hosts;
         global.downstream.downstream_hosts = host;
         global.downstream.current_downstream_host = host;
