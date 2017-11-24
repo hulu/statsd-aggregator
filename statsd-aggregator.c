@@ -173,6 +173,29 @@ void log_msg(int level, char *format, ...) {
     fflush(stdout);
 }
 
+void set_current_downstream_host() {
+    struct downstream_host_s *host = global.downstream.current_downstream_host;
+    int i = 0;
+
+    if (host == NULL) {
+        host = global.downstream.downstream_hosts;
+    }
+    if (host == NULL) {
+        return;
+    }
+    for (i = 0; i < global.downstream.downstream_host_num; i++) {
+        host = host->next;
+        if (host == NULL) {
+            host = global.downstream.downstream_hosts;
+        }
+        if (host->health_client.alive == 1) {
+            global.downstream.current_downstream_host = host;
+            return;
+        }
+    }
+    global.downstream.current_downstream_host = NULL;
+}
+
 // this function flushes data to downstream
 void downstream_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
     int bytes_send;
@@ -183,10 +206,12 @@ void downstream_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revent
         return;
     }
 
+    set_current_downstream_host();
     if (global.downstream.current_downstream_host == NULL) {
         log_msg(ERROR, "%s: no downstream hosts", __func__);
         return;
     }
+    log_msg(DEBUG, "%s: flushing to %s", __func__, inet_ntoa(global.downstream.current_downstream_host->sa_in_data.sin_addr));
 
     bytes_send = sendto(watcher->fd,
         global.downstream.buffer + flush_buffer_idx * DOWNSTREAM_BUF_SIZE,
@@ -206,16 +231,6 @@ void downstream_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revent
     if (bytes_send < 0) {
         log_msg(ERROR, "%s: sendto() failed %s", __func__, strerror(errno));
     }
-}
-
-void set_current_downstream_host() {
-    struct downstream_host_s *host = global.downstream.current_downstream_host;
-
-    if (host == NULL || host->next == NULL) {
-        global.downstream.current_downstream_host = global.downstream.downstream_hosts;
-        return;
-    }
-    global.downstream.current_downstream_host = host->next;
 }
 
 /* this function switches active and flush buffers, registers handler to send data when
@@ -258,7 +273,6 @@ void downstream_schedule_flush() {
         watcher = &(global.downstream.flush_watcher);
         if (global.downstream.packets_sent > MAX_PACKETS_PER_SOCKET) {
             global.downstream.packets_sent = 0;
-            set_current_downstream_host();
             new_socket_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
             if (new_socket_fd < 0) {
                 log_msg(ERROR, "%s: socket() failed %s", __func__, strerror(errno));
@@ -673,7 +687,6 @@ void update_downstreams() {
         log_msg(DEBUG, "%s: added new ip: %s", __func__, inet_ntoa(host->sa_in_data.sin_addr));
         host->next = global.downstream.downstream_hosts;
         global.downstream.downstream_hosts = host;
-        global.downstream.current_downstream_host = host;
     }
 
     global.downstream.in_addr_new_ready = 0;
