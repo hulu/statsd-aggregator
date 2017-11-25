@@ -45,8 +45,6 @@
 #define DEFAULT_LOG_LEVEL 0
 #define MAX_DOWNSTREAM_NUM 32
 #define MAX_PACKETS_PER_SOCKET 1000
-#define DEFAULT_HEALTH_PORT 8125
-#define DEFAULT_DATA_PORT 8125
 
 // structure to accumulate metrics data for specific name
 typedef struct {
@@ -499,12 +497,11 @@ int init_downstream(char *hosts) {
     int i = 0;
     char *host = hosts;
     char *data_port_s = NULL;
+    char *health_port_s = NULL;
     int host_len = 0;
 
     // argument line has the following format: host:data_port
     // now let's initialize downstreams
-    global.downstream.data_port = DEFAULT_DATA_PORT;
-    global.downstream.health_port = DEFAULT_HEALTH_PORT;
     global.downstream.packets_sent = 0;
     global.downstream.slots_used = 0;
     global.downstream.downstream_host_num = 0;
@@ -532,7 +529,14 @@ int init_downstream(char *hosts) {
     host_len = data_port_s - host;
     global.downstream.data_host = (char *)malloc(host_len);
     memcpy(global.downstream.data_host, host, host_len);
+    health_port_s = strchr(data_port_s, ':');
+    if (health_port_s == NULL) {
+        log_msg(ERROR, "%s: no health port for %s", __func__, host);
+        return 1;
+    }
+    *health_port_s++ = 0;
     global.downstream.data_port = atoi(data_port_s);
+    global.downstream.health_port = atoi(health_port_s);
     global.downstream.in_addr_new_ready = 0;
     get_dns_data();
     if (global.downstream.in_addr_new_ready != 1) {
