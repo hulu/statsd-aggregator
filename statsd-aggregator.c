@@ -870,7 +870,7 @@ int main(int argc, char *argv[]) {
     ev_io_start(loop, &socket_watcher);
 
     // global.downstream_flush_interval / 100 is used to have less fluctuations in the aggregated data
-    ev_periodic_init (&downstream_flush_timer_watcher, downstream_flush_timer_cb, downstream_flush_timer_at, global.downstream_flush_interval / 100, 0);
+    ev_periodic_init (&downstream_flush_timer_watcher, downstream_flush_timer_cb, downstream_flush_timer_at, global.downstream_flush_interval / 100.0, 0);
     ev_periodic_start (loop, &downstream_flush_timer_watcher);
 
     ev_periodic_init (&downstream_healthcheck_timer_watcher, downstream_healthcheck_timer_cb, downstream_healthcheck_timer_at, global.downstream_health_check_interval, 0);
