@@ -1,5 +1,5 @@
 PKG_NAME=statsd-aggregator
-PKG_VERSION=0.0.1
+PKG_VERSION=0.0.2
 PKG_DESCRIPTION="Local aggregator for statsd metrics"
 
 .PHONY: all test clean
