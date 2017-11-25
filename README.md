@@ -51,8 +51,13 @@ Working configuration file location is `/etc/statsd-aggregator.conf`
 
 * data\_port - statsd-aggregator would listen on this port (e.g. data\_port=8125)
 * downstream\_flush\_interval - How often we flush data to the downstream (float value in seconds e.g. downstream\_flush\_interval=1.0)
-* downstream - Downstream statsd address:port (e.g. downstream=127.0.0.1:8126)
+* downstream - Downstream statsd address:data\_port:health\_port (e.g. downstream=127.0.0.1:8126:8126).
 * log\_level - How noisy are our logs (4 - error, 3 - warn, 2 - info, 1 - debug, 0 - trace, e.g. log\_level=4)
+* dns\_refresh\_interval - how often we check for dns updates (e.g. dns\_refresh\_interval=60)
+* downstream\_health\_check\_interval - how often we check downstream health (e.g. downstream\_health\_check\_interval=1.0)
+
+Downstream host name can have multiple A records. In this case Statsd-aggregator will send data in the
+round robin fashion to all healthy downstream hosts.
 
 Statsd-aggregator can be controlled via `/etc/init.d/statsd-aggregator`
 
