@@ -17,6 +17,8 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <errno.h>
+#include <pthread.h>
+#include <arpa/inet.h>
 
 // Size of buffer for outgoing packets. Should be below MTU.
 // TODO Probably should be configured via configuration file?
@@ -33,6 +35,9 @@
 #define NUM_OF_SLOTS (DOWNSTREAM_BUF_SIZE / 7)
 
 #define MAX_COUNTER_LENGTH 18 // because of "%.15g|c\n"
+
+// let's check periodically if downstream ip changed
+#define DOWNSTREAM_REFRESH_TIMEOUT 60
 
 // structure to accumulate metrics data for specific name
 typedef struct {
@@ -55,8 +60,14 @@ struct downstream_s {
     char buffer[DOWNSTREAM_BUF_SIZE * DOWNSTREAM_BUF_NUM];
     // lengths of buffers from the above array
     int buffer_length[DOWNSTREAM_BUF_NUM];
-    // sockaddr for data
+    char *data_host;
+    int data_port;
+    // sockaddr for data (used for flush)
     struct sockaddr_in sa_in_data;
+    // new sockaddr filled in by the downstream_refresh()
+    struct sockaddr_in sa_in_data_new;
+    // flag that new sockaddr data is available
+    int sa_in_data_new_ready;
     // id extended ev_io structure used for sending data to downstream
     struct ev_io flush_watcher;
     // last time data was flushed to downstream
@@ -133,6 +144,11 @@ void ds_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revents) {
         return;
     }
 
+    // if there is new sockaddr data let's copy it and reset the flag
+    if (global.downstream.sa_in_data_new_ready == 1) {
+        global.downstream.sa_in_data = global.downstream.sa_in_data_new;
+        global.downstream.sa_in_data_new_ready = 0;
+    }
     bytes_send = sendto(watcher->fd,
         global.downstream.buffer + flush_buffer_idx * DOWNSTREAM_BUF_SIZE,
         global.downstream.buffer_length[flush_buffer_idx],
@@ -383,8 +399,9 @@ void ds_flush_timer_cb(struct ev_loop *loop, struct ev_periodic *p, int revents)
     }
 }
 
-void init_sockaddr_in(struct sockaddr_in *sa_in, char *host, char *port) {
-    struct hostent *he = gethostbyname(host);
+void init_sockaddr_in() {
+    struct sockaddr_in *sa_in = &global.downstream.sa_in_data_new;
+    struct hostent *he = gethostbyname(global.downstream.data_host);
 
     if (he == NULL || he->h_addr_list == NULL || (he->h_addr_list)[0] == NULL ) {
         log_msg(ERROR, "%s: gethostbyname() failed %s", __func__, strerror(errno));
@@ -392,15 +409,17 @@ void init_sockaddr_in(struct sockaddr_in *sa_in, char *host, char *port) {
     }
     bzero(sa_in, sizeof(*sa_in));
     sa_in->sin_family = AF_INET;
-    sa_in->sin_port = htons(atoi(port));
+    sa_in->sin_port = htons(global.downstream.data_port);
     memcpy(&(sa_in->sin_addr), he->h_addr_list[0], he->h_length);
+    global.downstream.sa_in_data_new_ready = 1;
 }
 
 // function to init downstream from config file line
 int init_downstream(char *hosts) {
     int i = 0;
     char *host = hosts;
-    char *data_port = NULL;
+    char *data_port_s = NULL;
+    int host_len = 0;
 
     // argument line has the following format: host:data_port
     // now let's initialize downstreams
@@ -418,13 +437,18 @@ int init_downstream(char *hosts) {
     for (i = 0; i < DOWNSTREAM_BUF_NUM; i++) {
         global.downstream.buffer_length[i] = 0;
     }
-    data_port = strchr(host, ':');
-    if (data_port == NULL) {
+    data_port_s = strchr(host, ':');
+    if (data_port_s == NULL) {
         log_msg(ERROR, "%s: no data port for %s", __func__, host);
         return 1;
     }
-    *data_port++ = 0;
-    init_sockaddr_in(&global.downstream.sa_in_data, host, data_port);
+    *data_port_s++ = 0;
+    host_len = data_port_s - host;
+    global.downstream.data_host = (char *)malloc(host_len);
+    memcpy(global.downstream.data_host, host, host_len);
+    global.downstream.data_port = atoi(data_port_s);
+    global.downstream.sa_in_data_new_ready = 0;
+    init_sockaddr_in();
     return 0;
 }
 
@@ -467,7 +491,7 @@ int init_config(char *filename) {
     size_t n = 0;
     int l = 0;
     int failures = 0;
-    char *buffer;
+    char *buffer = NULL;
 
     global.log_level = 0;
     FILE *config_file = fopen(filename, "rt");
@@ -503,6 +527,24 @@ int init_config(char *filename) {
     return 0;
 }
 
+void *downstream_refresh(void *args) {
+    while(1) {
+        sleep(DOWNSTREAM_REFRESH_TIMEOUT);
+        // if sockaddr data was copied let's refresh data
+        if (global.downstream.sa_in_data_new_ready == 0) {
+            init_sockaddr_in();
+        }
+    }
+    return NULL;
+}
+
+// http://stackoverflow.com/questions/791982/determine-if-a-string-is-a-valid-ip-address-in-c
+int is_valid_ip_address(char *ip_addr) {
+    struct sockaddr_in sa;
+    int result = inet_pton(AF_INET, ip_addr, &(sa.sin_addr));
+    return result != 0;
+}
+
 int main(int argc, char *argv[]) {
     struct ev_loop *loop = ev_default_loop(0);
     int data_socket;
@@ -510,6 +552,7 @@ int main(int argc, char *argv[]) {
     struct ev_io socket_watcher;
     struct ev_periodic ds_flush_timer_watcher;
     ev_tstamp ds_flush_timer_at = 0.0;
+    pthread_t downstream_socket_refresh_thread;
 
    if (argc != 2) {
         fprintf(stdout, "Usage: %s config.file\n", argv[0]);
@@ -532,6 +575,11 @@ int main(int argc, char *argv[]) {
     if (bind(data_socket, (struct sockaddr*) &addr, sizeof(addr)) != 0) {
         log_msg(ERROR, "%s: bind() failed %s", __func__, strerror(errno));
         return(1);
+    }
+
+    // if downstream is specified via ip address no need to run downstream_refresh()
+    if (! is_valid_ip_address(global.downstream.data_host)) {
+        pthread_create(&downstream_socket_refresh_thread, NULL, downstream_refresh, NULL);
     }
 
     ev_io_init(&socket_watcher, udp_read_cb, data_socket, EV_READ);

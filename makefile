@@ -6,7 +6,7 @@ PKG_DESCRIPTION="Local aggregator for statsd metrics"
 
 all: bin
 bin:
-	gcc -Wall -O2 -I/usr/include/libev -o statsd-aggregator statsd-aggregator.c -lev
+	gcc -Wall -O2 -I/usr/include/libev -o statsd-aggregator statsd-aggregator.c -lev -lpthread
 clean:
 	rm -rf statsd-aggregator build
 pkg: bin
