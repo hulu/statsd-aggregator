@@ -17,45 +17,36 @@ CMD_OPTIONS="$CONF_FILE"
     exit 1
 }
 
-lock_acquired=false
-
 get_lock() {
-    touch ${PID_FILE}.test || {
-        echo "Can't create ${PID_FILE}"
-        exit 1
-    }
-    rm -f ${PID_FILE}.test
+    local pid
     while true; do
-        set -- $(LC_ALL=C ls -il ${PID_FILE} 2>/dev/null)
-        if [ -z "${1:-}" ] ; then
-            ln -s $$ $PID_FILE && lock_acquired=true && return
-        else
-            ps ${12} >/dev/null 2>&1 && return
-            find $PID_FILE -inum ${1} -exec rm -f {} \;
-        fi
+        for pid in $(cat $PID_FILE 2>/dev/null); do
+            kill -0 $pid 2>/dev/null || continue
+            [ "$pid" != "$BASHPID" ] && return 1
+            echo $BASHPID >$PID_FILE.new && mv $PID_FILE.new $PID_FILE && return 0
+        done
+        echo $BASHPID >>$PID_FILE
     done
 }
 
 start() {
     echo -n "Starting $CMD ..."
-    ! $lock_acquired && echo "already started" && return
+    ! get_lock && echo " already started" && return
     $CMD $CMD_OPTIONS 0<&- 2>&1 | logger -i -t ${SERVICE} >/dev/null 2>&1 &
-    ln -nsf $(jobs -p) ${PID_FILE} && echo " done" && disown && return 0
+    jobs -p > ${PID_FILE}.new && mv $PID_FILE.new $PID_FILE && echo " done" && disown && return 0
     echo "failed"
     return 1
 }
 
 stop() {
     echo -n "Stopping $CMD ..."
-    $lock_acquired && echo "already stopped" && return
-    pid=$(readlink $PID_FILE)
+    get_lock && echo " already stopped" && return
+    pid=$(cat $PID_FILE)
     for sig in KILL TERM ; do
-        kill -${sig} $pid || true # killing already terminated process should not cause error
+        kill -${sig} $pid 2>/dev/null || true # killing already terminated process should not cause error
         for ((i = 0; i < 30; i++)) {
-            ps $pid >/dev/null 2>&1 && echo -n "." && sleep 1 && continue
-            get_lock
-            echo " done"
-            return 0
+            kill -0 $pid 2>/dev/null && echo -n "." && sleep 1 && continue
+            echo " done" && return 0
         }
    done
    echo "failed"
@@ -65,12 +56,11 @@ stop() {
 status() {
     exit_code=0
     not=''
-    $lock_acquired && exit_code=1 && not='not '
+    get_lock && exit_code=1 && not='not '
     echo "$CMD is ${not}running"
     exit $exit_code
 }
 
-get_lock
 case "${1:-}" in
     start)      start ;;
     stop)       stop ;;

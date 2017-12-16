@@ -15,6 +15,8 @@ require 'eventmachine'
 IN_PORT = 9000
 # port statsd aggregator writes to
 OUT_PORT = 9100
+# downstream health port
+HEALTH_PORT = 9200
 # location of config file for statsd aggregator. This config file is generated for each test run.
 CONFIG_FILE = "/tmp/statsd-aggregator.conf"
 # location of statsd aggregator executable
@@ -55,6 +57,17 @@ class OutputHandler < EventMachine::Connection
         @test_controller = test_controller
         # source should be network or stdout
         @source = source
+    end
+end
+
+class HealthServer < EventMachine::Connection
+    def initialize(test)
+        @test = test
+    end
+
+    def receive_data(data)
+        send_data("health: up\n")
+        @test.health_check_done = true
     end
 end
 
@@ -193,7 +206,7 @@ class StatsdAggregator
 end
 
 class StatsdAggregatorTest
-    attr_accessor :timeout, :test_sequence
+    attr_accessor :timeout, :test_sequence, :health_check_done
 
     # this function sends data during test execution
     def send_data_impl(data)
@@ -215,13 +228,15 @@ class StatsdAggregatorTest
             f.puts("log_level=4")
             f.puts("data_port=#{IN_PORT}")
             f.puts("downstream_flush_interval=#{FLUSH_INTERVAL}")
-            f.puts("downstream=127.0.0.1:#{OUT_PORT}")
+            f.puts("downstream=localhost:#{OUT_PORT}:#{HEALTH_PORT}")
         end
         # socket for sending data
         @data_socket = UDPSocket.new
         @sa = StatsdAggregator.new(self)
         # here we start event machine
         EventMachine::run do
+            # downstream health check
+            EventMachine::start_server('0.0.0.0', HEALTH_PORT, HealthServer, self)
             # let's start downstream
             EventMachine::open_datagram_socket('0.0.0.0', OUT_PORT, OutputHandler, self, "network")
             # start statsd aggregator
@@ -230,20 +245,28 @@ class StatsdAggregatorTest
             EventMachine.add_timer(@timeout) do
                 die("Timeout. Stdout: #{@stdout}, expected events: #{@expected_events}")
             end
-            sleep 1 # ugly delay to ensure statsd-aggregator started
-            @test_sequence.each do |run_data|
-                method = run_data[0]
-                if method == nil
-                    die("No method specified")
+            EventMachine.defer(
+                proc do
+                    while ! @health_check_done
+                        sleep(0.1)
+                    end
+                end,
+                proc do
+                    @test_sequence.each do |run_data|
+                        method = run_data[0]
+                        if method == nil
+                            die("No method specified")
+                        end
+                        send(method, run_data[1])
+                    end
+                    @sa.flush()
+                    if @expected_events.empty? && @stdout.empty?
+                        EventMachine.stop()
+                        exit(SUCCESS_EXIT_STATUS)
+                    end
+                    @test_completed = true
                 end
-                send(method, run_data[1])
-            end
-            @sa.flush()
-            if @expected_events.empty? && @stdout.empty?
-                EventMachine.stop()
-                exit(SUCCESS_EXIT_STATUS)
-            end
-            @test_completed = true
+            )
         end
     end
 
@@ -254,6 +277,7 @@ class StatsdAggregatorTest
         @test_completed = false
         @stdout = ""
         @id = 0
+        @health_check_done = false
     end
 
     # called by simulator to add expected events
