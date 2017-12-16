@@ -98,8 +98,6 @@ struct downstream_s {
     int in_addr_new_ready;
     // id extended ev_io structure used for sending data to downstream
     struct ev_io flush_watcher;
-    // last time data was flushed to downstream
-    ev_tstamp last_flush_time;
     // slots for accumulating metrics
     slot_s slots[NUM_OF_SLOTS];
     // how many slots are used
@@ -219,7 +217,6 @@ void downstream_flush_cb(struct ev_loop *loop, struct ev_io *watcher, int revent
         (struct sockaddr *) (&(global.downstream.current_downstream_host->sa_in_data)),
         sizeof(global.downstream.current_downstream_host->sa_in_data));
     // update flush time
-    global.downstream.last_flush_time = ev_now(loop);
     global.downstream.buffer_length[flush_buffer_idx] = 0;
     global.downstream.packets_sent++;
     global.downstream.flush_buffer_idx = (flush_buffer_idx + 1) % DOWNSTREAM_BUF_NUM;
@@ -504,7 +501,6 @@ int init_downstream(char *hosts) {
     global.downstream.downstream_host_num = 0;
     global.downstream.downstream_hosts = NULL;
     global.downstream.current_downstream_host = NULL;
-    global.downstream.last_flush_time = ev_time();
     global.downstream.active_buffer_idx = 0;
     global.downstream.active_buffer = global.downstream.buffer;
     global.downstream.active_buffer_length = 0;
